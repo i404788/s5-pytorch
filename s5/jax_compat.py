@@ -113,16 +113,63 @@ def associative_scan(operator, elems, axis=0, reverse=False):
 
     return tree_unflatten(tree, scans)
 
+def test_associative_scan(shape=(1, 24, 24)):
+    import jax.lax
+    import jax
+
+    x = np.random.randn(*shape)
+    jx = jax.numpy.array(x)
+    tx = torch.tensor(x, dtype=torch.float32)
+    
+    def nested_func(a,b):
+        a_i,b_i = a
+        a_j,b_j = b
+        return a_j*a_i, a_j*b_i + b_j
+    jy1, jy2 = jax.lax.associative_scan(nested_func, (jx, jx))
+    ty1, ty2 = associative_scan(nested_func, (tx,tx))
+    assert np.isclose(ty1.numpy(), np.array(jy1)).all() and np.isclose(ty2.numpy(), np.array(jy2)).all(), "Expected jax & pytorch impl to be close"
+
+    jy1, jy2 = jax.lax.associative_scan(nested_func, (jx, jx), reverse=True)
+    ty1, ty2 = associative_scan(nested_func, (tx,tx), reverse=True)
+    assert np.isclose(ty1.numpy(), np.array(jy1)).all() and np.isclose(ty2.numpy(), np.array(jy2)).all(), "Expected jax & pytorch reverse impl to be close"
+    
+    
 
 def _interleave(a, b, axis):
     assert a.shape[axis] == b.shape[axis] or a.shape[axis] == b.shape[axis] + 1
+    if b_trunc := (a.shape[axis] == b.shape[axis] + 1):
+        pad = [0, 0] * b.ndim
+        pad[(b.ndim-axis-1)*2+1] = 1 # +1=always end of dim, pad-order is reversed so start is at end
+        b = torch.nn.functional.pad(b, pad)
+        
     keys = list('ijklmnop')[:a.ndim]  # Get enough keys for each dim
     expr = 't ' + ' '.join(keys) + ' -> '
 
     keys[axis] = f'({keys[axis]} t)'  # Interleave along desired axis
     expr += ' '.join(keys)
     # for example 't i j -> (i t) j'
-    return rearrange([a, b], expr)
+    out: torch.Tensor = rearrange([a, b], expr)
+    if b_trunc:
+        out = out[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
+    return out
+
+def test_interleave():
+    x,y = torch.randn(1, 32, 32), torch.randn(1, 32, 32)
+    assert _interleave(x,y, axis=1).shape == (1,64,32)
+    assert _interleave(x,y, axis=2).shape == (1,32,64)
+
+    x,y = torch.randn(1, 24, 24), torch.randn(1, 24, 24)
+    assert _interleave(x,y, axis=1).shape == (1,48,24)
+    assert _interleave(x,y, axis=2).shape == (1,24,48)
+
+    x,y = torch.randn(3, 96), torch.randn(2, 96)
+    v = _interleave(x,y,axis=0)
+    assert v.shape == (5, 96)
+    assert torch.isclose(v[0], x[0]).all()
+    assert torch.isclose(v[1], y[0]).all()
+    assert torch.isclose(v[2], x[1]).all()
+    assert torch.isclose(v[3], y[1]).all()
+    assert torch.isclose(v[4], x[2]).all()
 
 
 def _compute_fans(shape, fan_in_axes=None):
@@ -325,3 +372,7 @@ def test_variance_scaling():
 
 if __name__ == '__main__':
     test_variance_scaling()
+    test_interleave()
+    test_associative_scan()
+    test_associative_scan(shape=(2,256,24))
+    test_associative_scan(shape=(360, 96))

@@ -26,10 +26,11 @@ def apply_ssm(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = Fal
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
 
     Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
-    _, xs = associative_scan(binary_operator, (Lambda_bars, Bu_elements), axis=1)
+    print(Lambda_bars.shape, Bu_elements.shape)
+    _, xs = associative_scan(binary_operator, (Lambda_bars, Bu_elements))
 
     if bidir:
-        _, xs2 = associative_scan(binary_operator, (Lambda_bars, Bu_elements), axis=1, reverse=True)
+        _, xs2 = associative_scan(binary_operator, (Lambda_bars, Bu_elements), reverse=True)
         xs = torch.cat((xs, xs2), axis=-1)
 
     Du = functorch.vmap(lambda u: D * u)(input_sequence)
@@ -41,10 +42,10 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
     https://arxiv.org/abs/2209.12951"""
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
     Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
-    _, xs = associative_scan(binary_operator, (Lambda_bars + Bu_elements, Bu_elements), axis=1)
+    _, xs = associative_scan(binary_operator, (Lambda_bars + Bu_elements, Bu_elements))
 
     if bidir:
-        _, xs2 = associative_scan(binary_operator, (Lambda_bars, Bu_elements), axis=1, reverse=True)
+        _, xs2 = associative_scan(binary_operator, (Lambda_bars, Bu_elements), reverse=True)
         xs = torch.cat((xs, xs2), axis=-1)
 
     Du = functorch.vmap(lambda u: D * u)(input_sequence)

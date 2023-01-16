@@ -63,7 +63,7 @@ def discretize_bilinear(Lambda, B_tilde, Delta):
     Returns:
         discretized Lambda_bar (complex64), B_bar (complex64)  (P,), (P,H)
     """
-    Identity = torch.ones(Lambda.shape[0])
+    Identity = torch.ones(Lambda.shape[0], device=Lambda.device)
     BL = 1 / (Identity - (Delta / 2.0) * Lambda)
     Lambda_bar = BL * (Identity + (Delta / 2.0) * Lambda)
     B_bar = (BL * Delta)[..., None] * B_tilde
@@ -80,7 +80,7 @@ def discretize_zoh(Lambda, B_tilde, Delta):
     Returns:
         discretized Lambda_bar (complex64), B_bar (complex64)  (P,), (P,H)
     """
-    Identity = torch.ones(Lambda.shape[0])
+    Identity = torch.ones(Lambda.shape[0], device=Lambda.device)
     Lambda_bar = torch.exp(Lambda * Delta)
     B_bar = (1 / Lambda * (Lambda_bar - Identity))[..., None] * B_tilde
     return Lambda_bar, B_bar
@@ -217,7 +217,7 @@ class S5SSM(torch.nn.Module):
             B_bar **= self.degree
 
         if not torch.is_tensor(step_scale) or step_scale.ndim == 0:
-            step_scale = torch.ones(signal.shape[-2]) * step_scale
+            step_scale = torch.ones(signal.shape[-2], device=signal.device) * step_scale
         step = step_scale[:, None] * torch.exp(self.log_step)
         # https://arxiv.org/abs/2209.12951v1, Eq. 9
         Bu = B_bar @ signal

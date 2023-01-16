@@ -238,7 +238,7 @@ class S5SSM(torch.nn.Module):
             B_bar **= self.degree
 
         if not torch.is_tensor(step_scale) or step_scale.ndim == 0:
-            step_scale = torch.ones(signal.shape[-2]) * step_scale
+            step_scale = torch.ones(signal.shape[-2], device=signal.device) * step_scale
         step = step_scale[:, None] * torch.exp(self.log_step)
 
         Lambda_bars, B_bars = functorch.vmap(self.discretize, (None, None, 0))(
@@ -299,7 +299,7 @@ class S5(torch.nn.Module):
         # NOTE: step_scale can be float | Tensor[batch] | Tensor[batch, seq]
         if not torch.is_tensor(step_scale):
             # Duplicate across batchdim
-            step_scale = torch.ones(signal.shape[0]) * step_scale
+            step_scale = torch.ones(signal.shape[0], device=signal.device) * step_scale
 
         return functorch.vmap(lambda s, ss: self.seq(s, step_scale=ss))(signal, step_scale)
         #return self.seq(signal, prev_state=prev_state, step_scale=step_scale)

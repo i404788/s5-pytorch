@@ -26,7 +26,6 @@ def apply_ssm(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = Fal
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
 
     Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
-    print(Lambda_bars.shape, Bu_elements.shape)
     _, xs = associative_scan(binary_operator, (Lambda_bars, Bu_elements))
 
     if bidir:
@@ -306,21 +305,20 @@ class S5(torch.nn.Module):
 
 
 class S5Block(torch.nn.Module):
-    def __init__(self,
-                 width: int,
-                 state_width: Optional[int] = None,
-                 factor_rank: Optional[int] = None,
-                 block_count: int = 1,
-                 dt_min: float = 0.001,
-                 dt_max: float = 0.1,
-                 liquid: bool = False,
-                 degree: int = 1,):
+    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None):
         super().__init__()
-        self.s5 = S5(width, state_width=state_width, factor_rank=factor_rank, block_count=block_count,
-                     dt_min=dt_min, dt_max=dt_max, liquid=liquid, degree=degree)
-        pass  # TODO: *former-style block
-
-
+        self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank)
+        self.ff = torch.nn.Linear(dim, dim)
+        self.act = torch.nn.GELU()
+        self.norm = torch.nn.LayerNorm(dim)
+    
+    def forward(self, x):
+        # Standard transfomer-style block with GELU/Pre-LayerNorm
+        x = self.norm(x)
+        x = self.act(self.s5(x)) + x
+        x = self.norm(x)
+        x = self.act(self.ff(x)) + x
+        return x
 
 
 if __name__ == '__main__':

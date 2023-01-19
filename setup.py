@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 's5-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.1.4',
+  version = '0.1.5',
   license='MIT',
   description = 'S5 - Simplified State Space Layers for Sequence Modeling - Pytorch',
   author = 'Ferris Kwaijtaal',

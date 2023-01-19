@@ -253,4 +253,3 @@ def init_rowwise_C(shape, dtype):
     shape = shape[:2] + ((2,) if len(shape) == 3 else ())
     lecun = variance_scaling(0.5, fan_in_axes=(0,))
     return lecun(shape, dtype)
-

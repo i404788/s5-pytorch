@@ -21,11 +21,19 @@ def binary_operator(q_i: Tuple[torch.Tensor, torch.Tensor], q_j: Tuple[torch.Ten
     A_j, b_j = q_j
     return A_j * A_i, A_j * b_i + b_j
 
-
-def apply_ssm(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
+def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
 
-    Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
+    if B_bars.ndim == 3:
+        # Dynamic timesteps (significantly more expensive)
+        Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
+    else:
+        # Static timesteps
+        Bu_elements = functorch.vmap(lambda u: B_bars @ u)(cinput_sequence)
+
+    if Lambda_bars.ndim == 1: # Repeat for associative_scan
+        Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
+
     _, xs = associative_scan(binary_operator, (Lambda_bars, Bu_elements))
 
     if bidir:
@@ -35,12 +43,21 @@ def apply_ssm(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = Fal
     Du = functorch.vmap(lambda u: D * u)(input_sequence)
     return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
 
-
 def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
     """Liquid time constant SSM \u00e1 la dynamical systems given in Eq. 8 of
     https://arxiv.org/abs/2209.12951"""
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
-    Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
+
+    if B_bars.ndim == 3:
+        # Dynamic timesteps (significantly more expensive)
+        Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
+    else:
+        # Static timesteps
+        Bu_elements = functorch.vmap(lambda u: B_bars @ u)(cinput_sequence)
+
+    if Lambda_bars.ndim == 1: # Repeat for associative_scan
+        Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
+
     _, xs = associative_scan(binary_operator, (Lambda_bars + Bu_elements, Bu_elements))
 
     if bidir:
@@ -52,6 +69,7 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
 
 
 # Discretization functions
+@torch.jit.script
 def discretize_bilinear(Lambda, B_tilde, Delta):
     """Discretize a diagonalized, continuous-time linear SSM
     using bilinear transform method.
@@ -68,7 +86,7 @@ def discretize_bilinear(Lambda, B_tilde, Delta):
     B_bar = (BL * Delta)[..., None] * B_tilde
     return Lambda_bar, B_bar
 
-
+@torch.jit.script
 def discretize_zoh(Lambda, B_tilde, Delta):
     """Discretize a diagonalized, continuous-time linear SSM
     using zero-order hold method.
@@ -79,9 +97,9 @@ def discretize_zoh(Lambda, B_tilde, Delta):
     Returns:
         discretized Lambda_bar (complex64), B_bar (complex64)  (P,), (P,H)
     """
-    Identity = torch.ones(Lambda.shape[0], device=Lambda.device)
+    # Identity = torch.ones(Lambda.shape[0], device=Lambda.device) # (replaced by -1)
     Lambda_bar = torch.exp(Lambda * Delta)
-    B_bar = (1 / Lambda * (Lambda_bar - Identity))[..., None] * B_tilde
+    B_bar = (1 / Lambda * (Lambda_bar - 1))[..., None] * B_tilde
     return Lambda_bar, B_bar
 
 
@@ -150,8 +168,8 @@ class S5SSM(torch.nn.Module):
 
         match bcInit:
             case 'complex_normal':
-                self.C = torch.nn.Parameter(torch.normal(0, 0.5 ** 0.5, (h, cp)))
-                self.B = torch.nn.Parameter(init_VinvB(lecun_normal, Vinv)((p, h), torch.float))
+                self.C = torch.nn.Parameter(torch.normal(0, 0.5 ** 0.5, (h, cp), dtype=torch.complex64))
+                self.B = torch.nn.Parameter(init_VinvB(lecun_normal(), Vinv)((p, h), torch.float))
             case 'dense_columns' | 'dense':
                 if bcInit == "dense_columns":
                     B_eigen_init = init_columnwise_VinvB
@@ -230,19 +248,19 @@ class S5SSM(torch.nn.Module):
     # NOTE: can only be used as RNN OR S5(MIMO) (no mixing)
     def forward(self, signal, step_scale: float | torch.Tensor = 1.0):
         B_tilde, C_tilde = self.get_BC_tilde()
-        step = step_scale * torch.exp(self.log_step)
-        Lambda_bar, B_bar = self.discretize(self.Lambda, B_tilde, step)
         if self.degree != 1:
             assert (B_bar.shape[-2] == B_bar.shape[-1]), "higher-order input operators must be full-rank"
             B_bar **= self.degree
 
         if not torch.is_tensor(step_scale) or step_scale.ndim == 0:
-            step_scale = torch.ones(signal.shape[-2], device=signal.device) * step_scale
-        step = step_scale[:, None] * torch.exp(self.log_step)
+            #step_scale = torch.ones(signal.shape[-2], device=signal.device) * step_scale
+            step = step_scale * torch.exp(self.log_step)
+        else:
+            # TODO: This is very expensive due to individual steps being multiplied by B_tilde in self.discretize
+            step = step_scale[:, None] * torch.exp(self.log_step)
 
-        Lambda_bars, B_bars = functorch.vmap(self.discretize, (None, None, 0))(
-            self.Lambda, B_tilde, step
-        )
+        Lambda_bars, B_bars = self.discretize(self.Lambda, B_tilde, step)
+        # Lambda_bars, B_bars = functorch.vmap(self.discretize, (None, None, 0))(self.Lambda, B_tilde, step)
         forward = apply_ssm_liquid if self.liquid else apply_ssm
         return forward(Lambda_bars, B_bars, C_tilde, self.D, signal, bidir=self.bidir)
 
@@ -262,7 +280,7 @@ class S5(torch.nn.Module):
         super().__init__()
         state_width = state_width or width
 
-        block_size = int(state_width / block_count)
+        block_size = state_width // block_count
         Lambda, _, B, V, B_orig = make_DPLR_HiPPO(block_size)
         Vinv = V.conj().T
         Lambda, B, V, B_orig, Vinv = map(lambda v: torch.tensor(v, dtype=torch.complex64), (Lambda, B, V, B_orig, Vinv))
@@ -305,9 +323,9 @@ class S5(torch.nn.Module):
 
 
 class S5Block(torch.nn.Module):
-    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None):
+    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None):
         super().__init__()
-        self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank)
+        self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank, bcInit=bcInit)
         self.ff = torch.nn.Linear(dim, dim)
         self.act = torch.nn.GELU()
         self.norm = torch.nn.LayerNorm(dim)
@@ -328,8 +346,8 @@ if __name__ == '__main__':
     def tensor_stats(t: torch.Tensor):  # Clone of lovely_tensors for complex support
         return f'tensor[{t.shape}] n={t.shape.numel()}, u={t.mean()}, s={round(t.std().item(), 3)} var={round(t.var().item(), 3)}\n'
 
-    x = torch.rand([2, 256, 32])
-    model = S5(32, 32, factor_rank=None)
+    x = torch.rand([2, 256, 32]).cuda()
+    model = S5(32, 32, factor_rank=None).cuda()
     print('B', tensor_stats(model.seq.B.data))
     print('C', tensor_stats(model.seq.C.data))
     #print('B', tensor_stats(model.seq.BH.data), tensor_stats(model.seq.BP.data))
@@ -338,5 +356,5 @@ if __name__ == '__main__':
     # state = model.initial_state(256)
     # res = model(x, prev_state=state)
     # print(res.shape, res.dtype, res)
-    res = model(x)
+    res = model(x) # warm-up
     print(res.shape, res.dtype, res)

@@ -135,28 +135,55 @@ def test_associative_scan(shape=(1, 24, 24)):
     
     
 
+# def _interleave(a, b, axis):
+#     assert a.shape[axis] == b.shape[axis] or a.shape[axis] == b.shape[axis] + 1
+#     if b_trunc := (a.shape[axis] == b.shape[axis] + 1):
+#         pad = [0, 0] * b.ndim
+#         pad[(b.ndim-axis-1)*2+1] = 1 # +1=always end of dim, pad-order is reversed so start is at end
+#         b = torch.nn.functional.pad(b, pad)
+        
+#     keys = list('ijklmnop')[:a.ndim]  # Get enough keys for each dim
+#     expr = 't ' + ' '.join(keys) + ' -> '
+
+#     keys[axis] = f'({keys[axis]} t)'  # Interleave along desired axis
+#     expr += ' '.join(keys)
+#     # for example 't i j -> (i t) j'
+#     out: torch.Tensor = rearrange([a, b], expr)
+#     if b_trunc:
+#         out = out[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
+#     return out
+
 def _interleave(a, b, axis):
-    assert a.shape[axis] == b.shape[axis] or a.shape[axis] == b.shape[axis] + 1
+    # https://stackoverflow.com/questions/60869537/how-can-i-interleave-5-pytorch-tensors
     if b_trunc := (a.shape[axis] == b.shape[axis] + 1):
         pad = [0, 0] * b.ndim
         pad[(b.ndim-axis-1)*2+1] = 1 # +1=always end of dim, pad-order is reversed so start is at end
         b = torch.nn.functional.pad(b, pad)
-        
-    keys = list('ijklmnop')[:a.ndim]  # Get enough keys for each dim
-    expr = 't ' + ' '.join(keys) + ' -> '
 
-    keys[axis] = f'({keys[axis]} t)'  # Interleave along desired axis
-    expr += ' '.join(keys)
-    # for example 't i j -> (i t) j'
-    out: torch.Tensor = rearrange([a, b], expr)
+    stacked = torch.stack([a, b], dim=axis+1)
+    interleaved = torch.flatten(stacked, start_dim=axis, end_dim=axis+1)
     if b_trunc:
-        out = out[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
-    return out
+        # TODO: find torch alternative for slice_along axis for torch.jit.script to work
+        interleaved = interleaved[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
+    return interleaved
 
 def test_interleave():
     x,y = torch.randn(1, 32, 32), torch.randn(1, 32, 32)
-    assert _interleave(x,y, axis=1).shape == (1,64,32)
-    assert _interleave(x,y, axis=2).shape == (1,32,64)
+    v = _interleave(x,y, axis=1)
+    assert v.shape == (1,64,32)
+    assert (v[:, 0] == x[:, 0]).all()
+    assert (v[:, 1] == y[:, 0]).all()
+    assert (v[:, 2] == x[:, 1]).all()
+    assert (v[:, 3] == y[:, 1]).all()
+    assert (v[:, 4] == x[:, 2]).all()
+
+    v = _interleave(x,y, axis=2)
+    assert v.shape == (1,32,64)
+    assert (v[..., 0] == x[..., 0]).all()
+    assert (v[..., 1] == y[..., 0]).all()
+    assert (v[..., 2] == x[..., 1]).all()
+    assert (v[..., 3] == y[..., 1]).all()
+    assert (v[..., 4] == x[..., 2]).all()
 
     x,y = torch.randn(1, 24, 24), torch.randn(1, 24, 24)
     assert _interleave(x,y, axis=1).shape == (1,48,24)
@@ -165,11 +192,12 @@ def test_interleave():
     x,y = torch.randn(3, 96), torch.randn(2, 96)
     v = _interleave(x,y,axis=0)
     assert v.shape == (5, 96)
-    assert torch.isclose(v[0], x[0]).all()
-    assert torch.isclose(v[1], y[0]).all()
-    assert torch.isclose(v[2], x[1]).all()
-    assert torch.isclose(v[3], y[1]).all()
-    assert torch.isclose(v[4], x[2]).all()
+    assert (v[0] == x[0]).all()
+    assert (v[1] == y[0]).all()
+    assert (v[2] == x[1]).all()
+    assert (v[3] == y[1]).all()
+    assert (v[4] == x[2]).all()
+    print('Interleave working as expected!')
 
 
 def _compute_fans(shape, fan_in_axes=None):

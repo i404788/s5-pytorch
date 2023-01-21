@@ -1,5 +1,6 @@
 import functorch
 import torch
+import torch.nn.functional as F
 import numpy as np
 from typing import overload, Callable, Iterable, List, TypeVar, Any, Literal, Union, Sequence, Tuple, Optional
 from .jax_compat import associative_scan
@@ -19,7 +20,8 @@ def binary_operator(q_i: Tuple[torch.Tensor, torch.Tensor], q_j: Tuple[torch.Ten
     """
     A_i, b_i = q_i
     A_j, b_j = q_j
-    return A_j * A_i, A_j * b_i + b_j
+    # return A_j * A_i, A_j * b_i + b_j
+    return A_j * A_i, torch.addcmul(b_j, A_j, b_i)
 
 def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
@@ -41,6 +43,7 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bid
         xs = torch.cat((xs, xs2), axis=-1)
 
     Du = functorch.vmap(lambda u: D * u)(input_sequence)
+    # TODO: the last element of xs (non-bidir) is the hidden state, allow returning it
     return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
 
 def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
@@ -279,6 +282,7 @@ class S5(torch.nn.Module):
                  bcInit: Optional[Initialization] = None):
         super().__init__()
         state_width = state_width or width
+        assert state_width % block_count == 0, "block_count should be a factor of state_width"
 
         block_size = state_width // block_count
         Lambda, _, B, V, B_orig = make_DPLR_HiPPO(block_size)
@@ -321,21 +325,31 @@ class S5(torch.nn.Module):
         return functorch.vmap(lambda s, ss: self.seq(s, step_scale=ss))(signal, step_scale)
         #return self.seq(signal, prev_state=prev_state, step_scale=step_scale)
 
+class GEGLU(torch.nn.Module):
+    def forward(self, x):
+        x, gates = x.chunk(2, dim = -1)
+        return x * F.gelu(gates)
 
 class S5Block(torch.nn.Module):
-    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None):
+    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None, ff_mult: float = 1., glu: bool = True):
         super().__init__()
         self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank, bcInit=bcInit)
-        self.ff = torch.nn.Linear(dim, dim)
-        self.act = torch.nn.GELU()
-        self.norm = torch.nn.LayerNorm(dim)
+        self.attn_norm = torch.nn.LayerNorm(dim)
+        self.geglu = GEGLU() if glu else None
+        self.ff_enc = torch.nn.Linear(dim, int(dim * ff_mult) * (1 + glu))
+        self.ff_dec = torch.nn.Linear(int(dim * ff_mult), dim)
+        self.ff_norm = torch.nn.LayerNorm(dim)
     
     def forward(self, x):
-        # Standard transfomer-style block with GELU/Pre-LayerNorm
-        x = self.norm(x)
-        x = self.act(self.s5(x)) + x
-        x = self.norm(x)
-        x = self.act(self.ff(x)) + x
+        # Standard transfomer-style block with GEGLU/Pre-LayerNorm
+        fx = self.attn_norm(x)
+        x = F.gelu(self.s5(x)) + fx
+
+        fx = self.ff_norm(x)
+        x = x = self.ff_enc(x)
+        if self.geglu is not None:
+            x = self.geglu(x)
+        x = self.ff_dec(x) + fx
         return x
 
 

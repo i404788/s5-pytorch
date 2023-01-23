@@ -331,7 +331,8 @@ class GEGLU(torch.nn.Module):
         return x * F.gelu(gates)
 
 class S5Block(torch.nn.Module):
-    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None, ff_mult: float = 1., glu: bool = True):
+    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None, ff_mult: float = 1., glu: bool = True, 
+                 ff_dropout: float = 0.0, attn_dropout: float = 0.0):
         super().__init__()
         self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank, bcInit=bcInit)
         self.attn_norm = torch.nn.LayerNorm(dim)
@@ -339,17 +340,21 @@ class S5Block(torch.nn.Module):
         self.ff_enc = torch.nn.Linear(dim, int(dim * ff_mult) * (1 + glu))
         self.ff_dec = torch.nn.Linear(int(dim * ff_mult), dim)
         self.ff_norm = torch.nn.LayerNorm(dim)
+        self.attn_dropout = torch.nn.Dropout(p=attn_dropout)
+        self.ff_dropout = torch.nn.Dropout(p=ff_dropout)
     
     def forward(self, x):
         # Standard transfomer-style block with GEGLU/Pre-LayerNorm
         fx = self.attn_norm(x)
         x = F.gelu(self.s5(x)) + fx
+        x = self.attn_dropout(x)
 
         fx = self.ff_norm(x)
         x = x = self.ff_enc(x)
         if self.geglu is not None:
             x = self.geglu(x)
         x = self.ff_dec(x) + fx
+        x = self.ff_dropout(x) # TODO: test if should be placed inbetween ff or after ff
         return x
 
 

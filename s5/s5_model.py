@@ -336,24 +336,26 @@ class S5Block(torch.nn.Module):
         super().__init__()
         self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank, bcInit=bcInit)
         self.attn_norm = torch.nn.LayerNorm(dim)
-        self.geglu = GEGLU() if glu else None
-        self.ff_enc = torch.nn.Linear(dim, int(dim * ff_mult) * (1 + glu))
-        self.ff_dec = torch.nn.Linear(int(dim * ff_mult), dim)
-        self.ff_norm = torch.nn.LayerNorm(dim)
         self.attn_dropout = torch.nn.Dropout(p=attn_dropout)
+        self.geglu = GEGLU() if glu else None
+        self.ff_enc = torch.nn.Linear(dim, int(dim * ff_mult) * (1 + glu), bias=False)
+        self.ff_dec = torch.nn.Linear(int(dim * ff_mult), dim, bias=False)
+        self.ff_norm = torch.nn.LayerNorm(dim)
         self.ff_dropout = torch.nn.Dropout(p=ff_dropout)
     
     def forward(self, x):
         # Standard transfomer-style block with GEGLU/Pre-LayerNorm
         fx = self.attn_norm(x)
-        x = F.gelu(self.s5(x)) + fx
+        res = fx.clone()
+        x = F.gelu(self.s5(fx)) + res
         x = self.attn_dropout(x)
 
         fx = self.ff_norm(x)
-        x = x = self.ff_enc(x)
+        res = fx.clone()
+        x = self.ff_enc(fx)
         if self.geglu is not None:
             x = self.geglu(x)
-        x = self.ff_dec(x) + fx
+        x = self.ff_dec(x) + res
         x = self.ff_dropout(x) # TODO: test if should be placed inbetween ff or after ff
         return x
 

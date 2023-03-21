@@ -6,6 +6,10 @@ Jax is required because it relies on the pytree structure but it's not used for 
 Pytorch 1.13 or later is required because it makes heavy use of `functorch.vamp` to substitute it's jax counterpart.
 Python 3.10 or later is required due to usage of the `match` keyword
 
+## Install
+```
+pip install s5-pytorch 
+```
 
 ## Example
 

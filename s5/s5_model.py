@@ -72,7 +72,6 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
 
 
 # Discretization functions
-@torch.jit.script
 def discretize_bilinear(Lambda, B_tilde, Delta):
     """Discretize a diagonalized, continuous-time linear SSM
     using bilinear transform method.
@@ -89,7 +88,6 @@ def discretize_bilinear(Lambda, B_tilde, Delta):
     B_bar = (BL * Delta)[..., None] * B_tilde
     return Lambda_bar, B_bar
 
-@torch.jit.script
 def discretize_zoh(Lambda, B_tilde, Delta):
     """Discretize a diagonalized, continuous-time linear SSM
     using zero-order hold method.

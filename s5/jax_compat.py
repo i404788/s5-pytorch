@@ -42,11 +42,6 @@ def safe_map(f, *args):
         assert len(arg) == n, f'length mismatch: {list(map(len, args))}'
     return list(map(f, *args))
 
-
-def slice_along_axis(start, end, stride=None, axis=0):
-    return (slice(None),) * axis + (slice(start, end, stride),)
-
-# @torch.jit.script
 def combine(tree, operator, a_flat, b_flat):
     # Lower `fn` to operate on flattened sequences of elems.
     a = tree_unflatten(a_flat, tree)
@@ -55,7 +50,6 @@ def combine(tree, operator, a_flat, b_flat):
     c_flat, _ = tree_flatten(c)
     return c_flat
 
-# @torch.jit.script
 def _scan(tree, operator, elems, axis: int):
     """Perform scan on `elems`."""
     num_elems = elems[0].shape[axis]
@@ -83,7 +77,7 @@ def _scan(tree, operator, elems, axis: int):
     # The first element of a scan is the same as the first element
     # of the original `elems`.
     even_elems = [
-      torch.cat([elem[slice_along_axis(0, 1, axis=axis)], result], dim=axis)
+      torch.cat([torch.ops.aten.slice(elem, axis, 0, 1), result], dim=axis)
       if result.shape.numel() > 0 and elem.shape[axis] > 0 else
       result if result.shape.numel() > 0 else
       torch.ops.aten.slice(elem, axis, 0, 1)  # Jax allows/ignores concat with 0-dim, Pytorch does not
@@ -92,7 +86,6 @@ def _scan(tree, operator, elems, axis: int):
     return list(safe_map(partial(_interleave, axis=axis), even_elems, odd_elems))
 
 # Pytorch impl. of jax.lax.associative_scan
-# @torch.jit.script
 def associative_scan(operator: Callable, elems, axis: int = 0, reverse: bool =False):
     # if not callable(operator):
     #     raise TypeError("lax.associative_scan: fn argument should be callable.")
@@ -155,7 +148,7 @@ def test_associative_scan(shape=(1, 24, 24)):
 #         out = out[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
 #     return out
 
-@torch.jit.script
+# @torch.jit.script
 def _interleave(a, b, axis: int):
     # https://stackoverflow.com/questions/60869537/how-can-i-interleave-5-pytorch-tensors
     b_trunc = (a.shape[axis] == b.shape[axis] + 1)
@@ -169,7 +162,6 @@ def _interleave(a, b, axis: int):
     if b_trunc:
         # TODO: find torch alternative for slice_along axis for torch.jit.script to work
         interleaved = torch.ops.aten.slice(interleaved, axis, 0, b.shape[axis]+a.shape[axis]-1)
-        # interleaved = interleaved[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
     return interleaved
 
 def test_interleave():

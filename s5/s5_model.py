@@ -1,4 +1,3 @@
-import functorch
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -28,10 +27,10 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bid
 
     if B_bars.ndim == 3:
         # Dynamic timesteps (significantly more expensive)
-        Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
+        Bu_elements = torch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
     else:
         # Static timesteps
-        Bu_elements = functorch.vmap(lambda u: B_bars @ u)(cinput_sequence)
+        Bu_elements = torch.vmap(lambda u: B_bars @ u)(cinput_sequence)
 
     if Lambda_bars.ndim == 1: # Repeat for associative_scan
         Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
@@ -42,9 +41,9 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bid
         _, xs2 = associative_scan(binary_operator, (Lambda_bars, Bu_elements), reverse=True)
         xs = torch.cat((xs, xs2), axis=-1)
 
-    Du = functorch.vmap(lambda u: D * u)(input_sequence)
+    Du = torch.vmap(lambda u: D * u)(input_sequence)
     # TODO: the last element of xs (non-bidir) is the hidden state, allow returning it
-    return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
+    return torch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
 
 def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
     """Liquid time constant SSM \u00e1 la dynamical systems given in Eq. 8 of
@@ -53,10 +52,10 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
 
     if B_bars.ndim == 3:
         # Dynamic timesteps (significantly more expensive)
-        Bu_elements = functorch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
+        Bu_elements = torch.vmap(lambda B_bar, u: B_bar @ u)(B_bars, cinput_sequence)
     else:
         # Static timesteps
-        Bu_elements = functorch.vmap(lambda u: B_bars @ u)(cinput_sequence)
+        Bu_elements = torch.vmap(lambda u: B_bars @ u)(cinput_sequence)
 
     if Lambda_bars.ndim == 1: # Repeat for associative_scan
         Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
@@ -67,8 +66,8 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
         _, xs2 = associative_scan(binary_operator, (Lambda_bars, Bu_elements), reverse=True)
         xs = torch.cat((xs, xs2), axis=-1)
 
-    Du = functorch.vmap(lambda u: D * u)(input_sequence)
-    return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
+    Du = torch.vmap(lambda u: D * u)(input_sequence)
+    return torch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
 
 
 # Discretization functions
@@ -261,7 +260,7 @@ class S5SSM(torch.nn.Module):
             step = step_scale[:, None] * torch.exp(self.log_step)
 
         Lambda_bars, B_bars = self.discretize(self.Lambda, B_tilde, step)
-        # Lambda_bars, B_bars = functorch.vmap(self.discretize, (None, None, 0))(self.Lambda, B_tilde, step)
+        # Lambda_bars, B_bars = torch.vmap(self.discretize, (None, None, 0))(self.Lambda, B_tilde, step)
         forward = apply_ssm_liquid if self.liquid else apply_ssm
         return forward(Lambda_bars, B_bars, C_tilde, self.D, signal, bidir=self.bidir)
 
@@ -320,7 +319,7 @@ class S5(torch.nn.Module):
             # Duplicate across batchdim
             step_scale = torch.ones(signal.shape[0], device=signal.device) * step_scale
 
-        return functorch.vmap(lambda s, ss: self.seq(s, step_scale=ss))(signal, step_scale)
+        return torch.vmap(lambda s, ss: self.seq(s, step_scale=ss))(signal, step_scale)
         #return self.seq(signal, prev_state=prev_state, step_scale=step_scale)
 
 class GEGLU(torch.nn.Module):

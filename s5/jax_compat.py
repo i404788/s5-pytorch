@@ -1,10 +1,8 @@
 import torch
-import functorch
 import numpy as np
 from jax.tree_util import tree_flatten, tree_unflatten
-from typing import overload, Callable, Iterable, List, TypeVar, Any, Literal, Union, Sequence, Tuple, Optional
+from typing import overload, Callable, Iterable, List, TypeVar, Any, Literal, Sequence, Optional
 from functools import partial
-from einops import rearrange
 import math
 
 """
@@ -80,8 +78,8 @@ def associative_scan(operator, elems, axis=0, reverse=False):
 
         # Combine adjacent pairs of elements.
         reduced_elems = combine(
-          [elem[slice_along_axis(0, -1, stride=2, axis=axis)] for elem in elems],
-          [elem[slice_along_axis(1, None, stride=2, axis=axis)] for elem in elems])
+            [elem[slice_along_axis(0, -1, stride=2, axis=axis)] for elem in elems],
+            [elem[slice_along_axis(1, None, stride=2, axis=axis)] for elem in elems])
 
         # Recursively compute scan for partially reduced tensors.
         odd_elems = _scan(reduced_elems)
@@ -98,11 +96,11 @@ def associative_scan(operator, elems, axis=0, reverse=False):
         # The first element of a scan is the same as the first element
         # of the original `elems`.
         even_elems = [
-          torch.cat([elem[slice_along_axis(0, 1, axis=axis)], result], dim=axis)
-          if result.shape.numel() > 0 and elem.shape[axis] > 0 else
-          result if result.shape.numel() > 0 else
-          elem[slice_along_axis(0, 1, axis=axis)]  # Jax allows/ignores concat with 0-dim, Pytorch does not
-          for (elem, result) in zip(elems, even_elems)]
+            torch.cat([elem[slice_along_axis(0, 1, axis=axis)], result], dim=axis)
+            if result.shape.numel() > 0 and elem.shape[axis] > 0 else
+            result if result.shape.numel() > 0 else
+            elem[slice_along_axis(0, 1, axis=axis)]  # Jax allows/ignores concat with 0-dim, Pytorch does not
+            for (elem, result) in zip(elems, even_elems)]
 
         return list(safe_map(partial(_interleave, axis=axis), even_elems, odd_elems))
 
@@ -113,6 +111,7 @@ def associative_scan(operator, elems, axis=0, reverse=False):
 
     return tree_unflatten(tree, scans)
 
+
 def test_associative_scan(shape=(1, 24, 24)):
     import jax.lax
     import jax
@@ -120,20 +119,19 @@ def test_associative_scan(shape=(1, 24, 24)):
     x = np.random.randn(*shape)
     jx = jax.numpy.array(x)
     tx = torch.tensor(x, dtype=torch.float32)
-    
-    def nested_func(a,b):
-        a_i,b_i = a
-        a_j,b_j = b
+
+    def nested_func(a, b):
+        a_i, b_i = a
+        a_j, b_j = b
         return a_j*a_i, a_j*b_i + b_j
     jy1, jy2 = jax.lax.associative_scan(nested_func, (jx, jx))
-    ty1, ty2 = associative_scan(nested_func, (tx,tx))
+    ty1, ty2 = associative_scan(nested_func, (tx, tx))
     assert np.isclose(ty1.numpy(), np.array(jy1)).all() and np.isclose(ty2.numpy(), np.array(jy2)).all(), "Expected jax & pytorch impl to be close"
 
     jy1, jy2 = jax.lax.associative_scan(nested_func, (jx, jx), reverse=True)
-    ty1, ty2 = associative_scan(nested_func, (tx,tx), reverse=True)
+    ty1, ty2 = associative_scan(nested_func, (tx, tx), reverse=True)
     assert np.isclose(ty1.numpy(), np.array(jy1)).all() and np.isclose(ty2.numpy(), np.array(jy2)).all(), "Expected jax & pytorch reverse impl to be close"
-    
-    
+
 
 # def _interleave(a, b, axis):
 #     assert a.shape[axis] == b.shape[axis] or a.shape[axis] == b.shape[axis] + 1
@@ -141,7 +139,7 @@ def test_associative_scan(shape=(1, 24, 24)):
 #         pad = [0, 0] * b.ndim
 #         pad[(b.ndim-axis-1)*2+1] = 1 # +1=always end of dim, pad-order is reversed so start is at end
 #         b = torch.nn.functional.pad(b, pad)
-        
+
 #     keys = list('ijklmnop')[:a.ndim]  # Get enough keys for each dim
 #     expr = 't ' + ' '.join(keys) + ' -> '
 
@@ -157,7 +155,7 @@ def _interleave(a, b, axis):
     # https://stackoverflow.com/questions/60869537/how-can-i-interleave-5-pytorch-tensors
     if b_trunc := (a.shape[axis] == b.shape[axis] + 1):
         pad = [0, 0] * b.ndim
-        pad[(b.ndim-axis-1)*2+1] = 1 # +1=always end of dim, pad-order is reversed so start is at end
+        pad[(b.ndim-axis-1)*2+1] = 1  # +1=always end of dim, pad-order is reversed so start is at end
         b = torch.nn.functional.pad(b, pad)
 
     stacked = torch.stack([a, b], dim=axis+1)
@@ -167,30 +165,31 @@ def _interleave(a, b, axis):
         interleaved = interleaved[slice_along_axis(0, b.shape[axis]+a.shape[axis]-1, axis=axis)]
     return interleaved
 
+
 def test_interleave():
-    x,y = torch.randn(1, 32, 32), torch.randn(1, 32, 32)
-    v = _interleave(x,y, axis=1)
-    assert v.shape == (1,64,32)
+    x, y = torch.randn(1, 32, 32), torch.randn(1, 32, 32)
+    v = _interleave(x, y, axis=1)
+    assert v.shape == (1, 64, 32)
     assert (v[:, 0] == x[:, 0]).all()
     assert (v[:, 1] == y[:, 0]).all()
     assert (v[:, 2] == x[:, 1]).all()
     assert (v[:, 3] == y[:, 1]).all()
     assert (v[:, 4] == x[:, 2]).all()
 
-    v = _interleave(x,y, axis=2)
-    assert v.shape == (1,32,64)
+    v = _interleave(x, y, axis=2)
+    assert v.shape == (1, 32, 64)
     assert (v[..., 0] == x[..., 0]).all()
     assert (v[..., 1] == y[..., 0]).all()
     assert (v[..., 2] == x[..., 1]).all()
     assert (v[..., 3] == y[..., 1]).all()
     assert (v[..., 4] == x[..., 2]).all()
 
-    x,y = torch.randn(1, 24, 24), torch.randn(1, 24, 24)
-    assert _interleave(x,y, axis=1).shape == (1,48,24)
-    assert _interleave(x,y, axis=2).shape == (1,24,48)
+    x, y = torch.randn(1, 24, 24), torch.randn(1, 24, 24)
+    assert _interleave(x, y, axis=1).shape == (1, 48, 24)
+    assert _interleave(x, y, axis=2).shape == (1, 24, 48)
 
-    x,y = torch.randn(3, 96), torch.randn(2, 96)
-    v = _interleave(x,y,axis=0)
+    x, y = torch.randn(3, 96), torch.randn(2, 96)
+    v = _interleave(x, y, axis=0)
     assert v.shape == (5, 96)
     assert (v[0] == x[0]).all()
     assert (v[1] == y[0]).all()
@@ -363,7 +362,6 @@ def lecun_normal(fan_in_axes=None, dtype=torch.float):
     return variance_scaling(1.0, "fan_in", "truncated_normal", fan_in_axes=fan_in_axes, dtype=dtype)
 
 
-
 def test_variance_scaling():
     v = variance_scaling(1.0, distribution='normal')
     n_f32 = v((1, 10000), dtype=torch.float)
@@ -402,5 +400,5 @@ if __name__ == '__main__':
     test_variance_scaling()
     test_interleave()
     test_associative_scan()
-    test_associative_scan(shape=(2,256,24))
+    test_associative_scan(shape=(2, 256, 24))
     test_associative_scan(shape=(360, 96))

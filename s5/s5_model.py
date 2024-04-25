@@ -1,8 +1,7 @@
 import functorch
 import torch
 import torch.nn.functional as F
-import numpy as np
-from typing import overload, Callable, Iterable, List, TypeVar, Any, Literal, Union, Sequence, Tuple, Optional
+from typing import Tuple, Optional, Literal
 from .jax_compat import associative_scan
 from .init import *
 
@@ -23,7 +22,8 @@ def binary_operator(q_i: Tuple[torch.Tensor, torch.Tensor], q_j: Tuple[torch.Ten
     # return A_j * A_i, A_j * b_i + b_j
     return A_j * A_i, torch.addcmul(b_j, A_j, b_i)
 
-def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
+
+def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, state=None, bidir: bool = False):
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
 
     if B_bars.ndim == 3:
@@ -33,8 +33,13 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bid
         # Static timesteps
         Bu_elements = functorch.vmap(lambda u: B_bars @ u)(cinput_sequence)
 
-    if Lambda_bars.ndim == 1: # Repeat for associative_scan
-        Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
+    if Lambda_bars.ndim == 1:  # Zero-pad for associative_scan
+        # Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
+        Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
+
+    if state is not None:
+        # Replace initial x_k with state if provided
+        Lambda_bars[:] = state
 
     _, xs = associative_scan(binary_operator, (Lambda_bars, Bu_elements))
 
@@ -44,9 +49,10 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, bid
 
     Du = functorch.vmap(lambda u: D * u)(input_sequence)
     # TODO: the last element of xs (non-bidir) is the hidden state, allow returning it
-    return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
+    return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du, xs[-1]
 
-def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: bool = False):
+
+def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, state=None, bidir: bool = False):
     """Liquid time constant SSM \u00e1 la dynamical systems given in Eq. 8 of
     https://arxiv.org/abs/2209.12951"""
     cinput_sequence = input_sequence.type(Lambda_bars.dtype)  # Cast to correct complex type
@@ -58,8 +64,12 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
         # Static timesteps
         Bu_elements = functorch.vmap(lambda u: B_bars @ u)(cinput_sequence)
 
-    if Lambda_bars.ndim == 1: # Repeat for associative_scan
-        Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
+    if Lambda_bars.ndim == 1:  # Zero-pad for associative_scan
+        Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
+
+    if state is not None:
+        # Replace initial x_k with state if provided
+        Lambda_bars[:] = state
 
     _, xs = associative_scan(binary_operator, (Lambda_bars + Bu_elements, Bu_elements))
 
@@ -68,7 +78,7 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, bidir: boo
         xs = torch.cat((xs, xs2), axis=-1)
 
     Du = functorch.vmap(lambda u: D * u)(input_sequence)
-    return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du
+    return functorch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du, xs[-1]
 
 
 # Discretization functions
@@ -88,6 +98,7 @@ def discretize_bilinear(Lambda, B_tilde, Delta):
     B_bar = (BL * Delta)[..., None] * B_tilde
     return Lambda_bar, B_bar
 
+
 def discretize_zoh(Lambda, B_tilde, Delta):
     """Discretize a diagonalized, continuous-time linear SSM
     using zero-order hold method.
@@ -98,9 +109,9 @@ def discretize_zoh(Lambda, B_tilde, Delta):
     Returns:
         discretized Lambda_bar (complex64), B_bar (complex64)  (P,), (P,H)
     """
-    # Identity = torch.ones(Lambda.shape[0], device=Lambda.device) # (replaced by -1)
+    Identity = torch.ones(Lambda.shape[0], device=Lambda.device) # (replaced by -1)
     Lambda_bar = torch.exp(Lambda * Delta)
-    B_bar = (1 / Lambda * (Lambda_bar - 1))[..., None] * B_tilde
+    B_bar = (1 / Lambda * (Lambda_bar - Identity))[..., None] * B_tilde
     return Lambda_bar, B_bar
 
 
@@ -247,23 +258,35 @@ class S5SSM(torch.nn.Module):
         return y, x
 
     # NOTE: can only be used as RNN OR S5(MIMO) (no mixing)
-    def forward(self, signal, step_scale: float | torch.Tensor = 1.0):
+    def forward(self, signal, step_scale: float | torch.Tensor = 1.0, state=None, return_state=False):
         B_tilde, C_tilde = self.get_BC_tilde()
-        if self.degree != 1:
-            assert (B_bar.shape[-2] == B_bar.shape[-1]), "higher-order input operators must be full-rank"
-            B_bar **= self.degree
 
         if not torch.is_tensor(step_scale) or step_scale.ndim == 0:
-            #step_scale = torch.ones(signal.shape[-2], device=signal.device) * step_scale
             step = step_scale * torch.exp(self.log_step)
         else:
             # TODO: This is very expensive due to individual steps being multiplied by B_tilde in self.discretize
             step = step_scale[:, None] * torch.exp(self.log_step)
 
+        # print(f'{self.Lambda.shape=} {B_tilde.shape=} {step.shape=}')
+        # Lambda_bars, B_bars = functorch.vmap(lambda s: self.discretize(self.Lambda, B_tilde, s))(step)
+        # print(Lambda_bars.shape, B_bars.shape)
         Lambda_bars, B_bars = self.discretize(self.Lambda, B_tilde, step)
-        # Lambda_bars, B_bars = functorch.vmap(self.discretize, (None, None, 0))(self.Lambda, B_tilde, step)
+        if self.degree != 1:
+            assert (B_bars.shape[-2] == B_bars.shape[-1]), "higher-order input operators must be full-rank"
+            B_bars **= self.degree
+
+        assert not (self.bidir and (state is not None)), "injecting state is not compatible with bidirectional S5"
+
         forward = apply_ssm_liquid if self.liquid else apply_ssm
-        return forward(Lambda_bars, B_bars, C_tilde, self.D, signal, bidir=self.bidir)
+        out, state = forward(Lambda_bars, B_bars, C_tilde, self.D, signal, state=state, bidir=self.bidir)
+        # NOTE: technically it could work in a limited sense; taking the first and last element
+        #   but that wouldn't be equivalent to running bidir on full sequences.
+        #  It would be more like a circular S5 where you keep splicing the new signal into it;
+        #   we leave implementing/testing this as an exercise to the reader
+        assert not (self.bidir and return_state), "return_state does not work with bidirectional S5"
+        if return_state:
+            return out, state
+        return out
 
 
 class S5(torch.nn.Module):
@@ -314,22 +337,26 @@ class S5(torch.nn.Module):
     def initial_state(self, batch_size: Optional[int] = None):
         return self.seq.initial_state(batch_size)
 
-    def forward(self, signal, step_scale: float | torch.Tensor = 1.0):
+    def forward(self, signal, step_scale: float | torch.Tensor = 1.0, state=None, return_state=False):
         # NOTE: step_scale can be float | Tensor[batch] | Tensor[batch, seq]
         if not torch.is_tensor(step_scale):
             # Duplicate across batchdim
             step_scale = torch.ones(signal.shape[0], device=signal.device) * step_scale
 
-        return functorch.vmap(lambda s, ss: self.seq(s, step_scale=ss))(signal, step_scale)
-        #return self.seq(signal, prev_state=prev_state, step_scale=step_scale)
+        if state is None:
+            return functorch.vmap(lambda s, ss: self.seq(s, step_scale=ss, return_state=return_state))(signal, step_scale)
+        else:
+            return functorch.vmap(lambda s, ss, _state: self.seq(s, step_scale=ss, state=_state, return_state=return_state))(signal, step_scale, state)
+
 
 class GEGLU(torch.nn.Module):
     def forward(self, x):
-        x, gates = x.chunk(2, dim = -1)
+        x, gates = x.chunk(2, dim=-1)
         return x * F.gelu(gates)
 
+
 class S5Block(torch.nn.Module):
-    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None, ff_mult: float = 1., glu: bool = True, 
+    def __init__(self, dim: int, state_dim: int, bidir: bool, block_count: int = 1, liquid: bool = False, degree: int = 1, factor_rank: int | None = None, bcInit: Optional[Initialization] = None, ff_mult: float = 1., glu: bool = True,
                  ff_dropout: float = 0.0, attn_dropout: float = 0.0):
         super().__init__()
         self.s5 = S5(dim, state_width=state_dim, bidir=bidir, block_count=block_count, liquid=liquid, degree=degree, factor_rank=factor_rank, bcInit=bcInit)
@@ -340,12 +367,16 @@ class S5Block(torch.nn.Module):
         self.ff_dec = torch.nn.Linear(int(dim * ff_mult), dim, bias=False)
         self.ff_norm = torch.nn.LayerNorm(dim)
         self.ff_dropout = torch.nn.Dropout(p=ff_dropout)
-    
-    def forward(self, x):
+
+    def forward(self, x, state=None, return_state=False):
         # Standard transfomer-style block with GEGLU/Pre-LayerNorm
         fx = self.attn_norm(x)
         res = fx.clone()
-        x = F.gelu(self.s5(fx)) + res
+        x = self.s5(fx, state=state, return_state=return_state)
+        if return_state:
+            x, next_state = x
+
+        x = F.gelu(x) + res
         x = self.attn_dropout(x)
 
         fx = self.ff_norm(x)
@@ -354,26 +385,47 @@ class S5Block(torch.nn.Module):
         if self.geglu is not None:
             x = self.geglu(x)
         x = self.ff_dec(x) + res
-        x = self.ff_dropout(x) # TODO: test if should be placed inbetween ff or after ff
+        x = self.ff_dropout(x)  # TODO: test if should be placed inbetween ff or after ff
+
+        if return_state:
+            return x, next_state
         return x
 
 
 if __name__ == '__main__':
-    import lovely_tensors as lt
-    lt.monkey_patch()
+    # import lovely_tensors as lt
+    # lt.monkey_patch()
 
     def tensor_stats(t: torch.Tensor):  # Clone of lovely_tensors for complex support
         return f'tensor[{t.shape}] n={t.shape.numel()}, u={t.mean()}, s={round(t.std().item(), 3)} var={round(t.var().item(), 3)}\n'
 
-    x = torch.rand([2, 256, 32]).cuda()
-    model = S5(32, 32, factor_rank=None).cuda()
+    x = torch.rand([2, 768, 32])
+    model = S5(32, 128)
     print('B', tensor_stats(model.seq.B.data))
     print('C', tensor_stats(model.seq.C.data))
-    #print('B', tensor_stats(model.seq.BH.data), tensor_stats(model.seq.BP.data))
-    #print('C', tensor_stats(model.seq.CH.data), tensor_stats(model.seq.CP.data))
+    # print('B', tensor_stats(model.seq.BH.data), tensor_stats(model.seq.BP.data))
+    # print('C', tensor_stats(model.seq.CH.data), tensor_stats(model.seq.CP.data))
     # FIXME: unstable initialization
     # state = model.initial_state(256)
     # res = model(x, prev_state=state)
     # print(res.shape, res.dtype, res)
-    res = model(x) # warm-up
-    print(res.shape, res.dtype, res)
+    res, state = model(x, return_state=True)
+    print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+    print(res.shape, res.dtype, res[:, -255])
+
+    print("Now with 100% more state:")
+    res, state = model(x[:, :256], return_state=True)
+    # print(state.shape, state.dtype, tensor_stats(state))
+    # print(res.shape, res.dtype, res)
+    res, state = model(x[:, 256:512], state=state, return_state=True)
+    # print(state.shape, state.dtype, tensor_stats(state))
+    # print(res.shape, res.dtype, res)
+    res, state = model(x[:, 512:768], state=state, return_state=True)
+    print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+    print(res.shape, res.dtype, res[:, -255])
+
+    print("Corrupted state (negative test):")
+    res, state = model(x[:, 512:768], state=torch.randn_like(state), return_state=True)
+    print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+    print(res.shape, res.dtype, res[:, -255])
+

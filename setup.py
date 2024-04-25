@@ -21,7 +21,7 @@ setup(
     install_requires=[
         'einops>=0.6',
         'scipy',
-        'torch>=1.13',
+        'torch>=2',
         'jax'
     ],
     classifiers=[

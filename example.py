@@ -10,8 +10,9 @@ model = S5Block(dim, 512, block_count=8, bidir=False)
 
 print(torchinfo.summary(model, (2, 8192, dim), device='cpu', depth=5))
 
-y = model(x)
-print(y.shape, y) # [2, 256, 32]
+for i in range(5):
+    y = model(x)
+    print(y.shape, y) # [2, 256, 32]
 
 with profiler.profile(with_stack=True, profile_memory=True) as prof:
     res = model(x)

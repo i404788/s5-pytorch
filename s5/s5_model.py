@@ -244,19 +244,16 @@ class S5SSM(torch.nn.Module):
             assert (B_bar.shape[-2] == B_bar.shape[-1]), "higher-order input operators must be full-rank"
             B_bar **= self.degree
 
-        if not torch.is_tensor(step_scale) or step_scale.ndim == 0:
-            step_scale = torch.ones(signal.shape[-2], device=signal.device) * step_scale
-        step = step_scale[:, None] * torch.exp(self.log_step)
         # https://arxiv.org/abs/2209.12951v1, Eq. 9
-        Bu = B_bar @ signal
+        Bu = B_bar @ signal.type(B_bar.dtype)
         if self.liquid:
             Lambda_bar += Bu
         # https://arxiv.org/abs/2208.04933v2, Eq. 2
-        x = Lambda_bar * prev_state + Bu
+        x = prev_state * prev_state + Bu
+        #x = Lambda_bar * prev_state + Bu
         y = (C_tilde @ x + self.D * signal).real
         return y, x
 
-    # NOTE: can only be used as RNN OR S5(MIMO) (no mixing)
     def forward(self, signal, step_scale: float | torch.Tensor = 1.0, state=None, return_state=False):
         B_tilde, C_tilde = self.get_BC_tilde()
 
@@ -394,6 +391,7 @@ class S5Block(torch.nn.Module):
 if __name__ == '__main__':
     # import lovely_tensors as lt
     # lt.monkey_patch()
+    from tqdm import tqdm
 
     def tensor_stats(t: torch.Tensor):  # Clone of lovely_tensors for complex support
         return f'tensor[{t.shape}] n={t.shape.numel()}, u={t.mean()}, s={round(t.std().item(), 3)} var={round(t.var().item(), 3)}\n'
@@ -404,27 +402,41 @@ if __name__ == '__main__':
     print('C', tensor_stats(model.seq.C.data))
     # print('B', tensor_stats(model.seq.BH.data), tensor_stats(model.seq.BP.data))
     # print('C', tensor_stats(model.seq.CH.data), tensor_stats(model.seq.CP.data))
-    # FIXME: unstable initialization
     # state = model.initial_state(256)
     # res = model(x, prev_state=state)
     # print(res.shape, res.dtype, res)
-    res, state = model(x, return_state=True)
-    print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
-    print(res.shape, res.dtype, res[:, -255])
+    with torch.no_grad():
+        res, state = model(x, return_state=True)
+        print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+        print(res.shape, res.dtype, res[:, -1])
 
-    print("Now with 100% more state:")
-    res, state = model(x[:, :256], return_state=True)
-    # print(state.shape, state.dtype, tensor_stats(state))
-    # print(res.shape, res.dtype, res)
-    res, state = model(x[:, 256:512], state=state, return_state=True)
-    # print(state.shape, state.dtype, tensor_stats(state))
-    # print(res.shape, res.dtype, res)
-    res, state = model(x[:, 512:768], state=state, return_state=True)
-    print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
-    print(res.shape, res.dtype, res[:, -255])
+        print("Now with 100% more state:")
+        res, state = model(x[:, :256], return_state=True)
+        # print(state.shape, state.dtype, tensor_stats(state))
+        # print(res.shape, res.dtype, res)
+        res, state = model(x[:, 256:512], state=state, return_state=True)
+        # print(state.shape, state.dtype, tensor_stats(state))
+        # print(res.shape, res.dtype, res)
+        res, state = model(x[:, 512:768], state=state, return_state=True)
+        print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+        print(res.shape, res.dtype, res[:, -1])
 
-    print("Corrupted state (negative test):")
-    res, state = model(x[:, 512:768], state=torch.randn_like(state), return_state=True)
-    print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
-    print(res.shape, res.dtype, res[:, -255])
+        print("Corrupted state (negative test):")
+        res, state = model(x[:, 512:768], state=torch.randn_like(state)/2, return_state=True)
+        print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+        print(res.shape, res.dtype, res[:, -1])
+
+        print("SSM specifics:")
+        ssm = model.seq
+        res, state = ssm.forward(x[0, :256], return_state=True)
+        # print(res[-1], state)
+        res, state = ssm.forward(x[0, 256:512], state=state, return_state=True)
+        print(res[-1], state[:10])
+
+        print("Now as rnn:")
+        state = torch.zeros_like(state[0])
+        for i in tqdm(range(512)):
+            res, state = ssm.forward_rnn(x[0,i], state)
+        print(res, state[:10])
+        
 

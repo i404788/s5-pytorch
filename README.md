@@ -2,8 +2,9 @@
 This is a ported version derived from <https://github.com/lindermanlab/S5> and <https://github.com/kavorite/S5>.
 It includes a bunch of functions ported from jax/lax/flax/whatever since they didn't exist yet. 
 
-Jax is required because it relies on the pytree structure but it's not used for any computation. 
-Pytorch 1.13 or later is required because it makes heavy use of `functorch.vamp` to substitute it's jax counterpart.
+~~Jax is required because it relies on the pytree structure but it's not used for any computation.~~
+Since version 0.2.0 jax is not required, it's using the pytorch native `torch.utils._pytree` (this may be incompatible for pytorch future versions).
+Pytorch 2 or later is required because it makes heavy use of `torch.vmap` and `torch.utils._pytree` to substitute it's jax counterpart.
 Python 3.10 or later is required due to usage of the `match` keyword
 
 \--- 

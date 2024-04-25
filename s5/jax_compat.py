@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from jax.tree_util import tree_flatten, tree_unflatten
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from typing import overload, Callable, Iterable, List, TypeVar, Any, Literal, Sequence, Optional
 from functools import partial
 import math

@@ -22,8 +22,10 @@ setup(
         'einops>=0.6',
         'scipy',
         'torch>=2',
-        'jax'
     ],
+    extra_requires={
+      "dev": ["jax"], 
+    },
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',

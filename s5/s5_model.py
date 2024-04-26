@@ -16,10 +16,10 @@ def binary_operator(q_i: Tuple[torch.Tensor, torch.Tensor], q_j: Tuple[torch.Ten
     Returns:
         new element ( A_out, Bu_out )
     """
-    A_i, b_i = q_i
-    A_j, b_j = q_j
-    # return A_j * A_i, A_j * b_i + b_j
-    return A_j * A_i, torch.addcmul(b_j, A_j, b_i)
+    A_i, Bu_i = q_i
+    A_j, Bu_j = q_j
+    return A_j * A_i, A_j * Bu_i + Bu_j
+    # return A_j * A_i, torch.addcmul(b_j, A_j, b_i)
 
 
 def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, state=None, bidir: bool = False):
@@ -33,12 +33,14 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, sta
         Bu_elements = torch.vmap(lambda u: B_bars @ u)(cinput_sequence)
 
     if Lambda_bars.ndim == 1:  # Zero-pad for associative_scan
-        # Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
-        Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
+        Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
+        # Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
 
     if state is not None:
-        # Replace initial x_k with state if provided
-        Lambda_bars[:] = state
+        # Bu_elements = torch.cat(((state).unsqueeze(0), Bu_elements), dim=0)
+        # Lambda_bars = torch.cat((torch.ones_like(state.unsqueeze(0)), Lambda_bars), dim=0)
+        # Manually compute first step (Lambda_bar=1 so no change)
+        Bu_elements[0] = Bu_elements[0]  + state * Lambda_bars[0]
 
     _, xs = associative_scan(binary_operator, (Lambda_bars, Bu_elements))
 
@@ -48,7 +50,7 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, sta
 
     Du = torch.vmap(lambda u: D * u)(input_sequence)
     # TODO: the last element of xs (non-bidir) is the hidden state, allow returning it
-    return torch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du, xs[-1]
+    return torch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du, xs[-1] #torch.stack((_[-1], xs[-1]))
 
 
 def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, state=None, bidir: bool = False):
@@ -67,8 +69,8 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, state=None
         Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
 
     if state is not None:
-        # Replace initial x_k with state if provided
-        Lambda_bars[:] = state
+        # Manually compute first step (Lambda_bar=1 so no change)
+        Bu_elements[0] = Bu_elements[0]  + state * Lambda_bars[0]
 
     _, xs = associative_scan(binary_operator, (Lambda_bars + Bu_elements, Bu_elements))
 
@@ -249,8 +251,7 @@ class S5SSM(torch.nn.Module):
         if self.liquid:
             Lambda_bar += Bu
         # https://arxiv.org/abs/2208.04933v2, Eq. 2
-        x = prev_state * prev_state + Bu
-        #x = Lambda_bar * prev_state + Bu
+        x = Lambda_bar * prev_state + Bu
         y = (C_tilde @ x + self.D * signal).real
         return y, x
 
@@ -407,7 +408,7 @@ if __name__ == '__main__':
     # print(res.shape, res.dtype, res)
     with torch.no_grad():
         res, state = model(x, return_state=True)
-        print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+        print(state.shape, state.dtype, tensor_stats(state), f'{state[..., :10]=}')
         print(res.shape, res.dtype, res[:, -1])
 
         print("Now with 100% more state:")
@@ -418,25 +419,30 @@ if __name__ == '__main__':
         # print(state.shape, state.dtype, tensor_stats(state))
         # print(res.shape, res.dtype, res)
         res, state = model(x[:, 512:768], state=state, return_state=True)
-        print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+        print(state.shape, state.dtype, tensor_stats(state), f'{state[..., :10]=}')
         print(res.shape, res.dtype, res[:, -1])
 
         print("Corrupted state (negative test):")
         res, state = model(x[:, 512:768], state=torch.randn_like(state)/2, return_state=True)
-        print(state.shape, state.dtype, tensor_stats(state), f'{state[:, :10]=}')
+        print(state.shape, state.dtype, tensor_stats(state), f'{state[..., :10]=}')
         print(res.shape, res.dtype, res[:, -1])
 
         print("SSM specifics:")
         ssm = model.seq
+        print("block:")
+        res, state = ssm.forward(x[0, :512], return_state=True)
+        print(res[-1], state[..., :10], state.shape)
+        
+        print("block-recurrent:")
         res, state = ssm.forward(x[0, :256], return_state=True)
         # print(res[-1], state)
         res, state = ssm.forward(x[0, 256:512], state=state, return_state=True)
-        print(res[-1], state[:10])
+        print(res[-1], state[..., :10], state.shape)
 
         print("Now as rnn:")
         state = torch.zeros_like(state[0])
         for i in tqdm(range(512)):
             res, state = ssm.forward_rnn(x[0,i], state)
-        print(res, state[:10])
+        print(res, state[..., :10], state.shape)
         
 

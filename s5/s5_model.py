@@ -18,8 +18,8 @@ def binary_operator(q_i: Tuple[torch.Tensor, torch.Tensor], q_j: Tuple[torch.Ten
     """
     A_i, Bu_i = q_i
     A_j, Bu_j = q_j
-    return A_j * A_i, A_j * Bu_i + Bu_j
-    # return A_j * A_i, torch.addcmul(b_j, A_j, b_i)
+    # return A_j * A_i, A_j * Bu_i + Bu_j
+    return A_j * A_i, torch.addcmul(Bu_j, A_j, Bu_i)
 
 
 def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, state=None, bidir: bool = False):
@@ -34,7 +34,6 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, sta
 
     if Lambda_bars.ndim == 1:  # Zero-pad for associative_scan
         Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
-        # Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
 
     if state is not None:
         # Bu_elements = torch.cat(((state).unsqueeze(0), Bu_elements), dim=0)
@@ -49,7 +48,6 @@ def apply_ssm(Lambda_bars: torch.Tensor, B_bars, C_tilde, D, input_sequence, sta
         xs = torch.cat((xs, xs2), axis=-1)
 
     Du = torch.vmap(lambda u: D * u)(input_sequence)
-    # TODO: the last element of xs (non-bidir) is the hidden state, allow returning it
     return torch.vmap(lambda x: (C_tilde @ x).real)(xs) + Du, xs[-1] #torch.stack((_[-1], xs[-1]))
 
 
@@ -66,7 +64,7 @@ def apply_ssm_liquid(Lambda_bars, B_bars, C_tilde, D, input_sequence, state=None
         Bu_elements = torch.vmap(lambda u: B_bars @ u)(cinput_sequence)
 
     if Lambda_bars.ndim == 1:  # Zero-pad for associative_scan
-        Lambda_bars = F.pad(Lambda_bars.unsqueeze(0), (0, 0, 0, input_sequence.shape[0]-1), 'constant', value=0)
+        Lambda_bars = Lambda_bars.tile(input_sequence.shape[0], 1)
 
     if state is not None:
         # Manually compute first step (Lambda_bar=1 so no change)
